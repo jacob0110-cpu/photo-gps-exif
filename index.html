@@ -38,11 +38,12 @@ input[type=text],input[type=password]{font:inherit;border:1px solid var(--bd);ba
 .st{font-size:12.5px;color:var(--mu)}.st.ok{color:var(--ac)}.st.er{color:var(--er)}
 .gps{color:var(--ac)}
 #log{font-size:13px;color:var(--mu);margin:8px 2px;white-space:pre-wrap}
+.tk{color:var(--ac)}
 </style>
 </head>
 <body>
 <div class="wrap">
-<h1>相片 GPS 標註工具(Gemini)</h1>
+<h1>相片 GPS 標註工具(Gemini + 軌跡)</h1>
 <p class="sub">選取相片 → Gemini 辨識內容與可能地點 → 挑選座標 → 寫入 EXIF GPS</p>
 
 <div class="bar">
@@ -54,8 +55,24 @@ input[type=text],input[type=password]{font:inherit;border:1px solid var(--bd);ba
   <button id="bDir" class="p">選擇資料夾</button>
   <button id="bFiles">選擇多張相片</button>
   <input id="fDir" type="file" webkitdirectory hidden>
-  <input id="fFiles" type="file" accept="image/jpeg" multiple hidden>
+  <input id="fFiles" type="file" accept=".jpg,.jpeg,.nef,.nrw,image/jpeg" multiple hidden>
   <input id="hint" type="text" placeholder="地區提示(選填),如:台灣 台北" style="flex:1;min-width:180px">
+</div>
+<div class="bar">
+  <button id="bTrk">載入軌跡檔(GPX / JSON)</button>
+  <input id="fTrk" type="file" accept=".gpx,.json,application/json" multiple hidden>
+  <span id="trkInfo" class="st">尚未載入軌跡</span>
+  <span class="sp"></span>
+  <label class="st">相機時區 UTC+<input id="tz" type="text" value="8" style="width:46px"></label>
+  <label class="st">時間偏移(秒)<input id="off" type="text" value="0" style="width:56px"></label>
+  <label class="st">最大間隔(分)<input id="gap" type="text" value="30" style="width:46px"></label>
+  <button id="bMatch" disabled>用軌跡配對選取相片</button>
+</div>
+<div class="bar">
+  <label class="st"><input id="grp" type="checkbox" checked> 同組只辨識一張(拍攝間隔 <input id="gmin" type="text" value="30" style="width:42px"> 分鐘內視為同組)</label>
+  <label class="st"><input id="skipTk" type="checkbox" checked> 已有軌跡座標者略過 AI</label>
+  <span class="sp"></span>
+  <button id="bCopy">套用一張的座標到所有已選</button>
 </div>
 <div class="bar">
   <button id="bAll">全選</button>
@@ -66,7 +83,7 @@ input[type=text],input[type=password]{font:inherit;border:1px solid var(--bd);ba
   <button id="bAI" class="p" disabled>辨識選取相片</button>
   <button id="bWrite" class="p" disabled>寫入 GPS</button>
 </div>
-<div class="note">請用「選擇資料夾」授權後(Chrome / Edge)可直接寫回原檔;否則會逐張下載新檔。僅支援 JPEG。AI 給的座標只是約略位置,請確認後再寫入,並先備份原檔。辨識時會把縮小後的相片傳送給 Google。</div>
+<div class="note">請用「選擇資料夾」授權後(Chrome / Edge)可直接寫回原檔;否則會逐張下載新檔。支援 JPEG 與 Nikon RAW(.NEF / .NRW);RAW 不會改動原檔,而是寫入同名的 .xmp 旁車檔(Lightroom、Capture One、darktable 等可讀取)。AI 給的座標只是約略位置,請確認後再寫入,並先備份原檔。辨識時會把縮小後的相片傳送給 Google。</div>
 <div id="log"></div>
 <div id="grid"></div>
 </div>
@@ -74,6 +91,7 @@ input[type=text],input[type=password]{font:inherit;border:1px solid var(--bd);ba
 <script>
 const $=s=>document.querySelector(s);
 let items=[],dirHandle=null;
+const OK=/\.(jpe?g|nef|nrw)$/i,isRaw=f=>/\.(nef|nrw)$/i.test(f.name);
 try{const k=localStorage.getItem("gk");if(k){$("#key").value=k;$("#rem").checked=true}const m=localStorage.getItem("gm");if(m)$("#model").value=m}catch(e){}
 function saveKey(){try{if($("#rem").checked){localStorage.setItem("gk",$("#key").value.trim());localStorage.setItem("gm",$("#model").value.trim())}else{localStorage.removeItem("gk")}}catch(e){}}
 function log(t){$("#log").textContent=t||""}
@@ -91,7 +109,7 @@ $("#bDir").onclick=async()=>{
 };
 async function walk(dir,out,depth=0){
   for await(const [n,h] of dir.entries()){
-    if(h.kind==="file"&&/\.jpe?g$/i.test(n))out.push({file:await h.getFile(),handle:h});
+    if(h.kind==="file"&&OK.test(n))out.push({file:await h.getFile(),handle:h,dir});
     else if(h.kind==="directory"&&depth<3)await walk(h,out,depth+1);
   }
 }
@@ -100,11 +118,11 @@ $("#fDir").onchange=e=>{dirHandle=null;load([...e.target.files].map(file=>({file
 $("#fFiles").onchange=e=>{dirHandle=null;load([...e.target.files].map(file=>({file})))};
 
 async function load(list){
-  list=list.filter(x=>/\.jpe?g$/i.test(x.file.name));
-  items=list.map((x,i)=>({i,file:x.file,handle:x.handle,sel:false,cands:null,choice:"none",man:{lat:"",lng:""},status:"",gps:null,date:""}));
+  list=list.filter(x=>OK.test(x.file.name));
+  items=list.map((x,i)=>({i,file:x.file,handle:x.handle,dir:x.dir,sel:false,cands:[],choice:"none",man:{lat:"",lng:""},status:"",gps:null,date:""}));
   $("#grid").innerHTML="";items.forEach(addCard);updCount();
   log(items.length?"載入縮圖中…":"找不到 JPEG 相片。");
-  for(const it of items)await prepare(it);
+  for(const it of items){await prepare(it);res(it)}
   log("");
 }
 function addCard(it){
@@ -124,17 +142,21 @@ function updCount(){
 $("#bAll").onclick=()=>items.forEach(x=>toggle(x,true));
 $("#bNone").onclick=()=>items.forEach(x=>toggle(x,false));
 
-async function scaled(file,max,asBlob){
+async function scaled(file,max,asBlob,rot){
   const bmp=await createImageBitmap(file);
-  const r=Math.min(1,max/Math.max(bmp.width,bmp.height));
-  const c=document.createElement("canvas");c.width=Math.round(bmp.width*r);c.height=Math.round(bmp.height*r);
-  c.getContext("2d").drawImage(bmp,0,0,c.width,c.height);bmp.close&&bmp.close();
+  const r=Math.min(1,max/Math.max(bmp.width,bmp.height)),w=Math.round(bmp.width*r),h=Math.round(bmp.height*r);
+  const sw=rot===6||rot===8;
+  const c=document.createElement("canvas");c.width=sw?h:w;c.height=sw?w:h;
+  const x=c.getContext("2d");
+  if(rot===6){x.translate(c.width,0);x.rotate(Math.PI/2)}else if(rot===8){x.translate(0,c.height);x.rotate(-Math.PI/2)}else if(rot===3){x.translate(c.width,c.height);x.rotate(Math.PI)}
+  x.drawImage(bmp,0,0,w,h);bmp.close&&bmp.close();
   return asBlob?new Promise(r=>c.toBlob(r,"image/jpeg",.85)):c.toDataURL("image/jpeg",.75);
 }
 function readBin(blob){return new Promise(r=>{const f=new FileReader();f.onload=()=>r(f.result);f.readAsBinaryString(blob)})}
 function readURL(f){return new Promise(r=>{const x=new FileReader();x.onload=()=>r(x.result);x.readAsDataURL(f)})}
 function dms(v,ref){if(!v||v.length<3)return null;const n=v.map(x=>x[0]/x[1]);let d=n[0]+n[1]/60+n[2]/3600;return(ref==="S"||ref==="W")?-d:d}
 async function prepare(it){
+  if(isRaw(it.file))return prepareRaw(it);
   const c=$("#c"+it.i);
   try{
     const url=await scaled(it.file,320);
@@ -149,11 +171,193 @@ async function prepare(it){
     if(la!=null&&lo!=null)it.gps={lat:la,lng:lo};
     it.date=(ex.Exif[piexif.ExifIFD.DateTimeOriginal]||"").replace(/^(\d{4}):(\d\d):(\d\d)/,"$1-$2-$3");
     it.cam=[ex["0th"][piexif.ImageIFD.Make],ex["0th"][piexif.ImageIFD.Model]].filter(Boolean).join(" ");
+    const om=/([+-])(\d\d):?(\d\d)/.exec(ex.Exif[36881]||"");
+    if(om)it.off=(om[1]==="-"?-1:1)*(+om[2]*60+ +om[3]);
   }catch(e){}
   meta(it);
 }
 function meta(it){
-  $("#c"+it.i+" .m").innerHTML=[it.date,it.gps?`<span class="gps">已有 GPS ${it.gps.lat.toFixed(5)}, ${it.gps.lng.toFixed(5)}</span>`:"無 GPS"].filter(Boolean).join(" · ");
+  $("#c"+it.i+" .m").innerHTML=[it.date,it.gps?`<span class="gps">已有 GPS ${it.gps.lat.toFixed(5)}, ${it.gps.lng.toFixed(5)}</span>`:"無 GPS",it.raw?"RAW · 寫入 .xmp":"",it.grpNo?`<span class="tk">組 ${it.grpNo}</span>`:""].filter(Boolean).join(" · ");
+}
+
+/* ---------- 軌跡配對 ---------- */
+let pts=[];
+$("#bTrk").onclick=()=>$("#fTrk").click();
+$("#fTrk").onchange=async e=>{
+  pts=[];
+  for(const f of e.target.files){
+    try{
+      const t=await f.text();
+      if(/\.gpx$/i.test(f.name)||t.trim().startsWith("<"))gpx(t);else collect(JSON.parse(t));
+    }catch(err){log("軌跡檔讀取失敗:"+f.name+" "+err.message)}
+  }
+  pts=pts.filter(p=>isFinite(p.t)&&isFinite(p.lat)&&isFinite(p.lng)).sort((a,b)=>a.t-b.t);
+  $("#trkInfo").textContent=pts.length?`${pts.length} 個點 · ${new Date(pts[0].t).toLocaleString()} ~ ${new Date(pts[pts.length-1].t).toLocaleString()}`:"沒有讀到可用的軌跡點";
+  $("#bMatch").disabled=!pts.length;
+};
+function gpx(t){
+  const d=new DOMParser().parseFromString(t,"application/xml");
+  d.querySelectorAll("trkpt,wpt,rtept").forEach(n=>{
+    const tm=n.querySelector("time");if(!tm)return;
+    pts.push({t:Date.parse(tm.textContent),lat:+n.getAttribute("lat"),lng:+n.getAttribute("lon")});
+  });
+}
+const LL=s=>{const m=/(-?\d+(?:\.\d+)?)\s*°?\s*,\s*(-?\d+(?:\.\d+)?)/.exec(s||"");return m?{lat:+m[1],lng:+m[2]}:null};
+const TT=v=>typeof v==="number"?v:(/^\d{10,}$/.test(v)?+v:Date.parse(v));
+function collect(o){
+  if(Array.isArray(o)){o.forEach(collect);return}
+  if(!o||typeof o!=="object")return;
+  const add=(t,p)=>{if(p&&t!=null)pts.push({t:TT(t),lat:p.lat,lng:p.lng})};
+  if(o.latitudeE7!=null&&o.longitudeE7!=null&&(o.timestamp||o.timestampMs))add(o.timestamp||o.timestampMs,{lat:o.latitudeE7/1e7,lng:o.longitudeE7/1e7});
+  if(o.point&&o.time)add(o.time,LL(o.point));
+  if(o.position&&o.position.LatLng&&o.position.timestamp)add(o.position.timestamp,LL(o.position.LatLng));
+  if(o.visit&&o.startTime){const p=LL(o.visit.topCandidate&&o.visit.topCandidate.placeLocation&&o.visit.topCandidate.placeLocation.latLng);add(o.startTime,p);add(o.endTime,p)}
+  if(o.activity&&o.startTime){add(o.startTime,LL(o.activity.start&&o.activity.start.latLng));add(o.endTime,LL(o.activity.end&&o.activity.end.latLng))}
+  if(o.placeVisit&&o.placeVisit.location&&o.placeVisit.duration){const l=o.placeVisit.location,p={lat:l.latitudeE7/1e7,lng:l.longitudeE7/1e7};add(o.placeVisit.duration.startTimestamp,p);add(o.placeVisit.duration.endTimestamp,p)}
+  for(const k in o)if(o[k]&&typeof o[k]==="object")collect(o[k]);
+}
+function photoT(it){
+  const m=/^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)/.exec(it.date||"");
+  if(!m)return NaN;
+  const offMin=it.off!=null?it.off:(parseFloat($("#tz").value)||0)*60;
+  return Date.UTC(+m[1],m[2]-1,+m[3],+m[4],+m[5],+m[6])-offMin*60000+(parseFloat($("#off").value)||0)*1000;
+}
+function match(t){
+  if(!pts.length||!isFinite(t))return null;
+  const gap=(parseFloat($("#gap").value)||30)*60000;
+  let lo=0,hi=pts.length;while(lo<hi){const m=(lo+hi)>>1;if(pts[m].t<t)lo=m+1;else hi=m}
+  const a=pts[lo],b=pts[lo-1];
+  if(a&&b&&t-b.t<=gap&&a.t-t<=gap){const r=(t-b.t)/((a.t-b.t)||1);return{lat:b.lat+(a.lat-b.lat)*r,lng:b.lng+(a.lng-b.lng)*r,dt:Math.min(t-b.t,a.t-t)}}
+  const n=[a,b].filter(Boolean).sort((x,y)=>Math.abs(x.t-t)-Math.abs(y.t-t))[0];
+  return n&&Math.abs(n.t-t)<=gap?{lat:n.lat,lng:n.lng,dt:Math.abs(n.t-t)}:null;
+}
+function mergeCands(it){it.cands=(it.track?[it.track]:[]).concat((it.cands||[]).filter(c=>c.src!=="track"))}
+$("#bMatch").onclick=()=>{
+  const sel=items.filter(x=>x.sel);let ok=0;
+  for(const it of sel){
+    const r=match(photoT(it));
+    it.track=r?{name:"軌跡配對座標",detail:`依拍攝時間配對,最近的軌跡點相差約 ${Math.round(r.dt/60000)} 分鐘`,lat:r.lat,lng:r.lng,src:"track"}:null;
+    mergeCands(it);
+    if(r){ok++;it.choice=0}
+    res(it);
+  }
+  log(`軌跡配對完成:${ok}/${sel.length} 張有符合的座標。`+(ok<sel.length?"未配對的請檢查相機時區、時間偏移或最大間隔。":""));
+};
+function groups(sel){
+  const gm=(parseFloat($("#gmin").value)||30)*60000;
+  const s=sel.filter(x=>isFinite(photoT(x))).sort((a,b)=>photoT(a)-photoT(b));
+  let n=0,last=null;
+  s.forEach(it=>{const t=photoT(it);if(last===null||t-last>gm)n++;last=t;it.grpNo=n;meta(it)});
+  sel.filter(x=>!isFinite(photoT(x))).forEach(it=>{it.grpNo=0;meta(it)});
+}
+$("#bCopy").onclick=()=>{
+  const sel=items.filter(x=>x.sel),src=sel.find(x=>coords(x));
+  if(!src){log("請先為已選相片中的其中一張選好座標。");return}
+  const c=coords(src);
+  sel.forEach(it=>{if(it!==src){it.man={lat:c.lat.toFixed(6),lng:c.lng.toFixed(6)};it.choice="manual";res(it)}});
+  log(`已將 ${src.file.name} 的座標套用到其他 ${sel.length-1} 張。`);
+};
+async function geo(it,q){
+  q=q.trim();if(!q)return;
+  it.status="查詢地名中…";res(it);
+  try{
+    const r=await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=3&accept-language=zh-TW&q="+encodeURIComponent(q));
+    const j=await r.json();
+    const add=j.map(x=>({name:x.name||x.display_name.split(",")[0],detail:x.display_name,lat:+x.lat,lng:+x.lon,src:"osm"}));
+    it.cands=(it.cands||[]).filter(c=>c.src!=="osm").concat(add);
+    if(add.length)it.choice=it.cands.findIndex(c=>c.src==="osm");
+    it.status=add.length?"":"查無結果";
+  }catch(e){it.status="查詢失敗:"+e.message}
+  res(it);
+}
+
+/* ---------- RAW(NEF)讀取 ---------- */
+function tiff(buf){
+  const v=new DataView(buf),b0=v.getUint16(0);
+  if(b0!==0x4949&&b0!==0x4d4d)throw new Error("不是 TIFF 結構的 RAW");
+  const le=b0===0x4949;
+  if(v.getUint16(2,le)!==42)throw new Error("不是 TIFF 結構的 RAW");
+  const U16=o=>v.getUint16(o,le),U32=o=>v.getUint32(o,le);
+  const SZ={1:1,2:1,3:2,4:4,5:8,7:1,9:4,10:8};
+  const ifd=off=>{
+    const n=U16(off),m={};
+    for(let i=0;i<n;i++){const e=off+2+i*12,ty=U16(e+2),c=U32(e+4),len=(SZ[ty]||1)*c;m[U16(e)]={ty,c,vo:len<=4?e+8:U32(e+8)}}
+    return{m,next:U32(off+2+n*12)};
+  };
+  const val=e=>e.ty===3?U16(e.vo):U32(e.vo);
+  const rat=(e,i)=>U32(e.vo+i*8)/(U32(e.vo+i*8+4)||1);
+  const str=e=>{let t="";for(let i=0;i<e.c;i++){const ch=v.getUint8(e.vo+i);if(!ch)break;t+=String.fromCharCode(ch)}return t};
+  const prev=[],seen=new Set();
+  const add=(o,l)=>{if(l>1000&&o+l<=buf.byteLength&&v.getUint8(o)===0xFF&&v.getUint8(o+1)===0xD8)prev.push({o,l})};
+  const walk=off=>{
+    while(off&&off<buf.byteLength-2&&!seen.has(off)){
+      seen.add(off);
+      let r;try{r=ifd(off)}catch(e){return}
+      const m=r.m;
+      try{
+        if(m[513]&&m[514])add(val(m[513]),val(m[514]));
+        if(m[259]&&val(m[259])===7&&m[273]&&m[279]&&m[273].c===1)add(val(m[273]),val(m[279]));
+        if(m[330])for(let i=0;i<m[330].c;i++)walk(U32(m[330].vo+i*4));
+      }catch(e){}
+      off=r.next;
+    }
+  };
+  const first=U32(4),ifd0=ifd(first).m;
+  walk(first);
+  const info={rot:ifd0[274]?val(ifd0[274]):1,cam:[271,272].map(k=>ifd0[k]?str(ifd0[k]):"").filter(Boolean).join(" ")};
+  try{
+    if(ifd0[34665]){
+      const ex=ifd(val(ifd0[34665])).m;
+      if(ex[36867])info.date=str(ex[36867]).replace(/^(\d{4}):(\d\d):(\d\d)/,"$1-$2-$3");
+      if(ex[36881]){const om=/([+-])(\d\d):?(\d\d)/.exec(str(ex[36881]));if(om)info.off=(om[1]==="-"?-1:1)*(+om[2]*60+ +om[3])}
+    }
+    if(ifd0[34853]){
+      const g=ifd(val(ifd0[34853])).m;
+      if(g[2]&&g[4]&&g[2].c===3&&g[4].c===3){
+        const d=e=>rat(e,0)+rat(e,1)/60+rat(e,2)/3600;
+        let la=d(g[2]),lo=d(g[4]);
+        if(g[1]&&str(g[1])==="S")la=-la;
+        if(g[3]&&str(g[3])==="W")lo=-lo;
+        if(isFinite(la)&&isFinite(lo)&&(la||lo))info.gps={lat:la,lng:lo};
+      }
+    }
+  }catch(e){}
+  prev.sort((a,b)=>b.l-a.l);
+  if(prev[0])info.src=new Blob([buf.slice(prev[0].o,prev[0].o+prev[0].l)],{type:"image/jpeg"});
+  return info;
+}
+async function prepareRaw(it){
+  const c=$("#c"+it.i);it.raw=true;
+  try{
+    const f=tiff(await it.file.arrayBuffer());
+    it.src=f.src;it.rot=f.rot;it.date=f.date||"";it.off=f.off;it.cam=f.cam;it.gps=f.gps||null;
+  }catch(e){log("RAW 讀取失敗:"+it.file.name+" "+e.message)}
+  try{
+    if(!it.src)throw 0;
+    const url=await scaled(it.src,320,false,it.rot);
+    c.querySelector(".ph").innerHTML=`<input type="checkbox"><img src="${url}" alt="">`;
+    c.querySelector("input").onchange=e=>toggle(it,e.target.checked);
+  }catch(e){c.querySelector(".ph .st").textContent="RAW 無法取得預覽圖"}
+  meta(it);
+}
+const GN='xmlns:exif="http://ns.adobe.com/exif/1.0/"';
+function xmpDeg(v,p,n){const a=Math.abs(v),d=Math.floor(a);return `${d},${((a-d)*60).toFixed(5)}${v<0?n:p}`}
+function xmpMerge(old,c){
+  const a=`exif:GPSVersionID="2.3.0.0" exif:GPSLatitude="${xmpDeg(c.lat,"N","S")}" exif:GPSLongitude="${xmpDeg(c.lng,"E","W")}"`;
+  if(!old||!/<rdf:Description\b/.test(old))
+    return `<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>\n<x:xmpmeta xmlns:x="adobe:ns:meta/">\n <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n  <rdf:Description rdf:about="" ${GN} ${a}/>\n </rdf:RDF>\n</x:xmpmeta>\n<?xpacket end="w"?>\n`;
+  const x=old.replace(/\sexif:GPS(?:VersionID|Latitude|Longitude)="[^"]*"/g,"").replace(/<exif:GPS(VersionID|Latitude|Longitude)>[^<]*<\/exif:GPS\1>/g,"");
+  return x.replace(/<rdf:Description\b[^>]*?(\/?>)/,(t,end)=>t.slice(0,t.length-end.length)+(/xmlns:exif=/.test(t)?"":" "+GN)+" "+a+end);
+}
+async function writeXmp(it,c){
+  const name=it.file.name.replace(/\.[^.]+$/,"")+".xmp";
+  if(it.handle&&it.dir&&dirHandle){
+    let old="";
+    try{old=await(await(await it.dir.getFileHandle(name)).getFile()).text()}catch(e){}
+    if(old){const bk=await it.dir.getFileHandle(name+".bak",{create:true});const bw=await bk.createWritable();await bw.write(old);await bw.close()}
+    const h=await it.dir.getFileHandle(name,{create:true});
+    const w=await h.createWritable();await w.write(xmpMerge(old,c));await w.close();
+  }else download(new Blob([xmpMerge("",c)],{type:"application/xml"}),name);
 }
 
 /* ---------- Gemini 辨識 ---------- */
@@ -179,12 +383,20 @@ async function ask(prompt,blob){
 $("#bAI").onclick=async()=>{
   saveKey();
   const sel=items.filter(x=>x.sel);
-  $("#bAI").disabled=true;let k=0;
+  groups(sel);
+  const useGrp=$("#grp").checked,skip=$("#skipTk").checked,seen=new Set(),reps=[];
   for(const it of sel){
-    k++;log(`辨識中 ${k}/${sel.length}:${it.file.name}`);
+    if(skip&&it.track)continue;
+    if(useGrp&&it.grpNo){if(seen.has(it.grpNo))continue;seen.add(it.grpNo)}
+    reps.push(it);
+  }
+  $("#bAI").disabled=true;let k=0;
+  for(const it of reps){
+    k++;log(`辨識中 ${k}/${reps.length}:${it.file.name}`);
     it.status="辨識中…";res(it);
     try{
-      const blob=await scaled(it.file,1024,true);
+      if(it.raw&&!it.src)throw new Error("此 RAW 沒有可用的預覽圖,請改用軌跡配對或手動輸入");
+      const blob=await scaled(it.src||it.file,1024,true,it.rot);
       const hint=$("#hint").value.trim();
       const out=await ask(
 `你是相片地點辨識專家。請根據圖片內容(地標、建築、招牌文字、街景、地形)判斷拍攝地點。
@@ -192,10 +404,14 @@ ${hint?"使用者提供的地區提示:"+hint+"\n":""}${it.date?"拍攝日期:"+
 只回傳 JSON,格式:
 {"description":"繁體中文,一兩句說明畫面內容","candidates":[{"name":"地名或建築名稱(繁體中文)","detail":"簡短說明與判斷依據","lat":緯度數字,"lng":經度數字,"confidence":0到1}]}
 最多 3 個候選,依可信度由高到低;座標為該地標或地點的中心點。若完全無法判斷,candidates 回傳空陣列,不要亂猜。`,blob);
-      it.desc=out.description||"";
-      it.cands=(out.candidates||[]).filter(c=>isFinite(c.lat)&&isFinite(c.lng)).slice(0,3);
-      it.choice=it.cands.length&&it.cands[0].confidence>=.5?0:"none";
-      it.status="";
+      const ai=(out.candidates||[]).filter(c=>isFinite(c.lat)&&isFinite(c.lng)).slice(0,3);
+      const grp=useGrp&&it.grpNo?sel.filter(x=>x.grpNo===it.grpNo):[it];
+      grp.forEach(m=>{
+        m.desc=out.description||"";m.cands=ai.map(c=>({...c}));mergeCands(m);
+        m.choice=m.track?0:(m.cands.length&&m.cands[0].confidence>=.5?0:"none");
+        m.status=m===it?"":"同組套用(代表:"+it.file.name+")";
+        if(m!==it)res(m);
+      });
     }catch(e){
       it.status="辨識失敗:"+(e.message||"未知錯誤");it.cands=it.cands||[];log(it.status);
       if(/HTTP 4(01|03|29)|HTTP 400/.test(e.message||"")){res(it);break}
@@ -207,17 +423,17 @@ ${hint?"使用者提供的地區提示:"+hint+"\n":""}${it.date?"拍攝日期:"+
 };
 function res(it){
   const el=$("#c"+it.i+" .res");let h="";
-  if(it.status)h+=`<div class="st ${it.status.startsWith("辨識失敗")?"er":""}">${esc(it.status)}</div>`;
+  if(it.status)h+=`<div class="st ${/失敗/.test(it.status)?"er":""}">${esc(it.status)}</div>`;
   if(it.cands){
     if(it.desc)h+=`<p class="desc">${esc(it.desc)}</p>`;
     it.cands.forEach((c,j)=>{
       h+=`<label class="opt ${it.choice===j?"on":""}"><input type="radio" name="r${it.i}" value="${j}" ${it.choice===j?"checked":""}>
-      <span><b>${esc(c.name)}</b> · ${Math.round((c.confidence||0)*100)}%<small>${esc(c.detail||"")}</small>
+      <span><b>${esc(c.name)}</b>${c.src==="track"?" · 軌跡":c.src==="osm"?" · 地名查詢":" · "+Math.round((c.confidence||0)*100)+"%"}<small>${esc(c.detail||"")}</small>
       <small>${(+c.lat).toFixed(5)}, ${(+c.lng).toFixed(5)} · <a href="https://www.google.com/maps?q=${c.lat},${c.lng}" target="_blank" rel="noopener">看地圖</a></small></span></label>`;
     });
     if(!it.cands.length&&!it.status)h+=`<div class="st">無法判斷地點,可手動輸入座標。</div>`;
     h+=`<label class="opt ${it.choice==="manual"?"on":""}"><input type="radio" name="r${it.i}" value="manual" ${it.choice==="manual"?"checked":""}>
-      <span>手動輸入座標<div class="man"><input type="text" class="la" placeholder="緯度" value="${esc(it.man.lat)}"><input type="text" class="lo" placeholder="經度" value="${esc(it.man.lng)}"></div></span></label>
+      <span>手動輸入座標<div class="man"><input type="text" class="pq" placeholder="輸入地名查座標" value="${esc(it.pq||"")}"><button class="pg" type="button">查詢</button></div><div class="man"><input type="text" class="la" placeholder="緯度" value="${esc(it.man.lat)}"><input type="text" class="lo" placeholder="經度" value="${esc(it.man.lng)}"></div></span></label>
     <label class="opt ${it.choice==="none"?"on":""}"><input type="radio" name="r${it.i}" value="none" ${it.choice==="none"?"checked":""}><span>不標註</span></label>`;
   }
   if(it.wst)h+=`<div class="st ${it.wst.ok?"ok":"er"}">${esc(it.wst.t)}</div>`;
@@ -225,6 +441,8 @@ function res(it){
   el.querySelectorAll("input[type=radio]").forEach(r=>r.onchange=()=>{
     it.choice=r.value==="none"||r.value==="manual"?r.value:+r.value;res(it);
   });
+  const pq=el.querySelector(".pq"),pg=el.querySelector(".pg");
+  if(pg){pq.oninput=()=>{it.pq=pq.value};pg.onclick=()=>geo(it,pq.value)}
   const la=el.querySelector(".la"),lo=el.querySelector(".lo");
   if(la){la.oninput=lo.oninput=()=>{it.man={lat:la.value,lng:lo.value};if(it.choice!=="manual"){it.choice="manual";res(it);const a=$("#c"+it.i+" .la");a.focus();a.setSelectionRange(a.value.length,a.value.length)}}}
 }
@@ -266,7 +484,9 @@ $("#bWrite").onclick=async()=>{
     log(`寫入中 ${++n}/${todo.length}`);
     if(it.gps&&!$("#ow").checked){it.wst={ok:false,t:"已有 GPS,略過(可勾選「覆蓋已有 GPS」)"};res(it);continue}
     try{
-      const c=coords(it),blob=await tag(it.file,c.lat,c.lng);
+      const c=coords(it);
+      if(it.raw){await writeXmp(it,c);it.gps=c;it.wst={ok:true,t:`已寫入 ${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}(.xmp 旁車檔)`};meta(it);res(it);continue}
+      const blob=await tag(it.file,c.lat,c.lng);
       if(it.handle&&dirHandle){
         const w=await it.handle.createWritable();await w.write(blob);await w.close();
         it.file=await it.handle.getFile();
